@@ -1,0 +1,32 @@
+# 大模型权重
+model/*/model.safetensors
+model/*/*.bin
+model/*/*.pth
+model/*/*.ckpt
+model/*/output/*.rkllm
+*.rkllm
+
+# SDK（从 Rockchip 官方下载）
+sdk/
+
+# 编译产物
+build/
+install/
+*.o
+*.a
+
+# 部署产物（脚本生成）
+deploy/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 旧 git 备份
+.git_backup/

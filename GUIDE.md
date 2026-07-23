@@ -1,0 +1,481 @@
+# RKLLM Quickstart 完全指南
+
+> 从零开始在 RK3588/RK3576 上部署大语言模型
+
+---
+
+## 目录
+
+1. [环境搭建](#1-环境搭建)
+2. [下载模型](#2-下载模型)
+3. [模型转换（量化）](#3-模型转换量化)
+4. [编译板端程序](#4-编译板端程序)
+5. [板端部署与运行](#5-板端部署与运行)
+6. [跨平台迁移指南](#6-跨平台迁移指南)
+7. [支持的模型与芯片](#7-支持的模型与芯片)
+8. [项目结构说明](#8-项目结构说明)
+9. [常见问题](#9-常见问题)
+
+---
+
+## 1. 环境搭建
+
+### 1.1 硬件要求
+
+| 阶段 | 环境 | 要求 |
+|------|------|------|
+| 模型转换 | PC / Linux 虚拟机 | 16GB+ 内存，CPU 或 NVIDIA GPU |
+| 模型编译 | PC / Linux 虚拟机 | Android NDK r21e |
+| 模型运行 | RK3588 开发板 | Android 或 Linux 系统 |
+
+### 1.2 安装 RKLLM Toolkit
+
+RKLLM Toolkit 是 Rockchip 官方提供的模型转换工具包，用于将 HuggingFace 格式的模型转换为板端可用的 `.rkllm` 格式。
+
+```bash
+# 下载 RKLLM SDK (含 toolkit wheel)
+git clone https://github.com/airockchip/rknn-llm.git
+
+# 安装对应 Python 版本的 wheel
+cd rknn-llm/rkllm-toolkit/packages/
+pip install rkllm_toolkit-1.3.0-cp312-cp312-linux_x86_64.whl
+
+# 验证安装
+python -c "from rkllm.api import RKLLM; print('RKLLM OK')"
+```
+
+支持的 Python 版本: **3.9 / 3.10 / 3.11 / 3.12**
+
+> **注意**: wheel 文件是 Linux x86_64 的，Windows 上无法安装。请使用 Linux 物理机、WSL 或虚拟机。
+
+### 1.3 安装 Android NDK（仅编译需要）
+
+如果你使用的是 Linux 系统（不是 Android），可跳过此步，改用 `build-linux.sh`。
+
+```bash
+# 下载 NDK r21e
+wget https://dl.google.com/android/repository/android-ndk-r21e-linux-x86_64.zip
+
+# 解压到 ~/opts/
+mkdir -p ~/opts
+unzip android-ndk-r21e-linux-x86_64.zip -d ~/opts/
+
+# 验证
+ls ~/opts/android-ndk-r21e/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++
+```
+
+### 1.4 克隆本工程
+
+```bash
+git clone <this-repo-url>
+cd rkllm-quickstart
+
+# 克隆 RKLLM SDK 到 sdk/ 目录
+git clone https://github.com/airockchip/rknn-llm.git sdk
+```
+
+---
+
+## 2. 下载模型
+
+从 HuggingFace 下载原始模型权重：
+
+```bash
+cd model/
+
+# DeepSeek-R1-Distill-Qwen-1.5B (3.4GB)
+git clone https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+
+# 或者其他支持的模型，例如：
+# git clone https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct
+```
+
+> **模型目录结构**：
+> ```
+> model/DeepSeek-R1-Distill-Qwen-1.5B/
+> ├── model.safetensors    # 3.4GB, 模型权重
+> ├── config.json          # 模型配置
+> ├── tokenizer.json       # 分词器
+> ├── tokenizer_config.json
+> └── generation_config.json
+> ```
+
+---
+
+## 3. 模型转换（量化）
+
+### 3.1 转换流程图
+
+```
+HuggingFace 模型 (FP16/FP32)
+    │
+    ▼ load_huggingface()
+加载到内存
+    │
+    ▼ build(do_quantization=True)
+量化 + 优化 (W8A8 / W4A16)
+    │
+    ▼ export_rkllm()
+.rkllm 格式输出
+    │
+    ▼
+推送到 RK3588 板端推理
+```
+
+### 3.2 运行转换
+
+```bash
+cd scripts/
+
+# 激活 conda 环境（如果用了 conda）
+conda activate rkllm
+
+# 开始转换（CPU 模式，约 20-30 分钟）
+python export.py
+```
+
+### 3.3 转换参数说明
+
+`scripts/export.py` 中的关键参数：
+
+```python
+modelpath = '.../model/DeepSeek-R1-Distill-Qwen-1.5B'  # 模型路径
+
+# 加载参数
+device = 'cpu'      # 'cpu' 或 'cuda'（GPU 更快）
+dtype = 'float16'   # 'float32' / 'float16' / 'bfloat16'
+
+# 量化参数
+target_platform = "RK3588"   # 目标芯片
+quantized_dtype = "W8A8"     # W8A8(8bit) / W4A16(4bit)
+num_npu_core = 3             # NPU 核数
+max_context = 4096           # 最大上下文长度
+```
+
+### 3.4 预期输出
+
+```
+INFO: rkllm-toolkit version: 1.3.0
+Load model ...
+Optimizing model: 100%|████████| 28/28 [20:31<00:00]
+Converting model: 100%|████████| 339/339 [00:00<00:00]
+Exporting the model ...
+Model saved to: ../model/DeepSeek-R1-Distill-Qwen-1.5B/output/
+                DeepSeek-R1-Distill-Qwen-1.5B_W8A8_RK3588.rkllm
+```
+
+---
+
+## 4. 编译板端程序
+
+### 4.1 Android 编译
+
+```bash
+cd scripts/
+./build-android.sh
+```
+
+输出产物在 `../deploy/android/`:
+
+```
+deploy/android/
+├── llm_demo          # 可执行文件 (4.7MB)
+└── lib/
+    ├── librkllmrt.so # RKLLM 运行时 (4.5MB)
+    └── libomp.so     # OpenMP 运行时
+```
+
+### 4.2 Linux 编译
+
+如果你的板子跑的是 Linux 系统：
+
+```bash
+cd scripts/
+
+# 先修改交叉编译工具链路径
+# 编辑 build-linux.sh 中的 GCC_COMPILER_PATH
+
+./build-linux.sh
+```
+
+---
+
+## 5. 板端部署与运行
+
+### 5.1 推送文件
+
+```bash
+# 推 Android 二进制
+adb push ../deploy/android /data/
+
+# 推模型
+adb push ../model/DeepSeek-R1-Distill-Qwen-1.5B/output/*.rkllm /data/android/
+
+# 推定频脚本（优化 NPU 性能）
+adb push ../sdk/scripts/fix_freq_rk3588.sh /data/android/
+```
+
+### 5.2 板端运行
+
+```bash
+adb shell
+cd /data/android
+
+# 设置库路径
+export LD_LIBRARY_PATH=./lib
+
+# 定频（提升 NPU 推理稳定性）
+sh fix_freq_rk3588.sh
+
+# 开启性能日志
+export RKLLM_LOG_LEVEL=1
+
+# 运行推理
+./llm_demo DeepSeek-R1-Distill-Qwen-1.5B_W8A8_RK3588.rkllm 2048 4096
+```
+
+用法: `./llm_demo <模型文件> <max_new_tokens> <max_context_len>`
+
+### 5.3 预期输出
+
+```
+rkllm init start
+rkllm init success
+
+******************可输入以下问题对应序号获取回答/或自定义输入********************
+
+[0] 现有一笼子，里面有鸡和兔子若干只，数一数，共有头14个，腿38条...
+[1] 有28位小朋友排成一行,从左边开始数第10位是学豆...
+
+*************************************************************************
+
+user: 0
+robot: <think>
+首先，设鸡的数量为x，兔子的数量为y...
+</think>
+
+鸡有 9 只，兔子有 5 只。
+```
+
+---
+
+## 6. 跨平台迁移指南
+
+### 6.1 更换芯片
+
+当你要从 RK3588 切换到其他芯片时，只需修改 `scripts/export.py` 中的 3 个参数：
+
+```python
+# ============ 第 27-31 行 ============
+target_platform = "RK3576"    # RK3588 → RK3576
+quantized_dtype = "W4A16"     # W8A8 → W4A16 (RK3576 推荐)
+num_npu_core = 2              # 3 → 2
+```
+
+| 芯片 | target_platform | 推荐量��� | num_npu_core |
+|------|----------------|----------|-------------|
+| RK3588 | `"RK3588"` | `"W8A8"` | `3` |
+| RK3576 | `"RK3576"` | `"W4A16"` 或 `"W8A8"` | `2` |
+| RK3562 | `"RK3562"` | `"W8A8"` | `1` |
+| RV1126B | `"RV1126B"` | `"W8A8"` | `1` |
+
+### 6.2 更换模型
+
+替换模型只需改 `scripts/export.py` 第 11 行的 `modelpath`：
+
+```python
+# DeepSeek-R1-1.5B
+modelpath = '/path/to/DeepSeek-R1-Distill-Qwen-1.5B'
+
+# 换成 Qwen2.5
+modelpath = '/path/to/Qwen2.5-1.5B-Instruct'
+
+# 换成 LLaMA
+modelpath = '/path/to/Llama-3.2-3B'
+```
+
+### 6.3 编译目标切换
+
+`scripts/build-android.sh` 中的关键变量：
+
+| 变量 | Android | Linux |
+|------|---------|-------|
+| `ANDROID_NDK_PATH` | `~/opts/android-ndk-r21e` | 不需要 |
+| `CMAKE_SYSTEM_NAME` | `Android` | `Linux` |
+| `TARGET_ARCH` | `arm64-v8a` | `aarch64` |
+
+### 6.4 修改编译目标架构
+
+在 `build-android.sh` 第 8 行：
+```bash
+TARGET_ARCH=arm64-v8a     # 64位 ARM
+# TARGET_ARCH=armeabi-v7a # 32位 ARM（较少用）
+```
+
+在 `build-linux.sh` 中修改交叉编译器路径（第 8 行）：
+```bash
+GCC_COMPILER_PATH=/your/toolchain/path/bin/aarch64-none-linux-gnu
+```
+
+---
+
+## 7. 支持的模型与芯片
+
+### 7.1 模型架构支持表
+
+基于 **RKLLM SDK v1.3.0**：
+
+#### 纯文本 LLM
+
+| 模型家族 | HuggingFace 示例 |
+|----------|-----------------|
+| LLaMA | `meta-llama/Llama-3.2-1B`, `TinyLlama/TinyLlama-1.1B` |
+| Qwen2/2.5/3/3.5 | `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen3-0.6B` |
+| Phi2/Phi3 | `microsoft/phi-2`, `microsoft/Phi-3-mini-4k-instruct` |
+| ChatGLM3 | `THUDM/chatglm3-6b` |
+| Gemma2/3/3n/4 | `google/gemma-2-2b-it` |
+| InternLM2 | `internlm/internlm2-1.8b` |
+| MiniCPM3/4 | `openbmb/MiniCPM3-4B` |
+| TeleChat2 | `Tele-AI/TeleChat2-3B` |
+| DeepSeek-R1-Distill | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
+| SmolLM3 | `HuggingFaceTB/SmolLM3-1.7B-Instruct` |
+| RWKV7 | RNN 架构，需要 Python 3.12 |
+
+#### 多模态 VL 模型
+
+| 模型家族 | 支持视觉 |
+|----------|---------|
+| Qwen2-VL / Qwen3-VL | ✅ 图像理解 |
+| MiniCPM-V-2_6 | ✅ 图像理解 |
+| InternVL2-1B / InternVL3-1B | ✅ 图像理解 |
+| Janus-Pro-1B | ✅ 多模态 |
+| DeepSeekOCR | ✅ OCR 识别 |
+| SmolVLM | ✅ 图像理解 |
+
+### 7.2 添加自定义模型
+
+对于不在官方支持列表中的模型，可以通过 `model/custom/` 目录提供自定义定义：
+
+```
+model/custom/
+├── configuration_custom.py   # 模型配置类
+├── modeling_custom.py        # 模型结构定义
+├── tokenizer.json            # 分词器
+├── config.json               # 模型参数
+└── generation_config.json    # 生成参数
+```
+
+然后在 `export.py` 中使用 `custom_config` 参数：
+```python
+ret = llm.load_huggingface(
+    model=modelpath,
+    custom_config='/path/to/model/custom',
+    device='cpu',
+    dtype='float32'
+)
+```
+
+---
+
+## 8. 项目结构说明
+
+```
+rkllm-quickstart/
+│
+├── scripts/                    # 所有用户脚本
+│   ├── export.py              # ★ 核心: 模型转换脚本
+│   │   # 修改: modelpath, target_platform, quantized_dtype, num_npu_core
+│   │
+│   ├── quant_data.py          # 量化校准数据生成
+│   │   # 用法: python quant_data.py -m /path/to/model
+│   │
+│   ├── build-android.sh       # Android 编译
+│   │   # 修改: ANDROID_NDK_PATH
+│   │
+│   ├── build-linux.sh         # Linux 编译
+│   │   # 修改: GCC_COMPILER_PATH
+│   │
+│   └── data_quant.json        # 量化校准样本（20 条中英文混合）
+│
+├── model/                      # 模型文件
+│   ├── DeepSeek-R1-Distill-Qwen-1.5B/  # 从 HF 下载的原始模型
+│   │   └── output/            # 转换后的 .rkllm 文件
+│   └── custom/                # 自定义模型定义
+│
+├── deploy/                     # 编译产物（自动生成）
+│   ├── android/               # Android 部署包
+│   │   ├── llm_demo
+│   │   └── lib/
+│   └── linux/                 # Linux 部署包
+│
+├── sdk/                        # RKLLM SDK（需自行克隆）
+│   │ git clone https://github.com/airockchip/rknn-llm.git sdk
+│   ├── rkllm-toolkit/         # 模型转换工具包
+│   ├── rkllm-runtime/         # 运行时库
+│   └── scripts/               # 定频/性能评估脚本
+│
+├── README.md                   # 快速上手
+├── GUIDE.md                    # 本详细指南
+└── .gitignore                  # Git 忽略规则
+```
+
+---
+
+## 9. 常见问题
+
+### Q1: 模型转换报 "target_platform not support quantized_dtype"
+
+```python
+# RK3588 不支持 W4A16，改用 W8A8
+quantized_dtype = "W8A8"
+
+# RK3576 支持 W4A16 和 W8A8
+quantized_dtype = "W4A16"  # 或 "W8A8"
+```
+
+### Q2: 推板后报 "No such file or directory"
+
+说明编译产物与板子系统不匹配：
+- Android 板子 → 必须用 `build-android.sh` 编译
+- Linux 板子 → 必须用 `build-linux.sh` 编译
+
+### Q3: 报 "libomp.so not found"
+
+```bash
+# 从 SDK 复制
+cp sdk/rkllm-runtime/Android/librkllm_api/arm64-v8a/libomp.so deploy/android/lib/
+
+# 重新推送
+adb push deploy/android/lib/libomp.so /data/android/lib/
+```
+
+### Q4: 转换速度太慢
+
+- CPU 模式：1.5B 模型约 20-30 分钟
+- CUDA 模式：5-10 分钟（需 `device='cuda'` + `dtype='float16'`）
+- 大型模型（7B+）建议用 CUDA，否则可能需要数小时
+
+### Q5: 如何加速推理
+
+1. 运行定频脚本：`sh fix_freq_rk3588.sh`
+2. 减少 `max_context` 参数（默认 4096）
+3. 使用更高压缩比的量化：`W4A16`（如果芯片支持）
+
+### Q6: 内存不足怎么办
+
+- RK3588：DeepSeek-R1-1.5B W8A8 约需 2.5GB RAM
+- 减少上下文长度：`max_context = 2048`
+- 使用更小模型：Qwen2.5-0.5B / TinyLlama-1.1B
+
+---
+
+## 参考资源
+
+- [RKLLM GitHub](https://github.com/airockchip/rknn-llm)
+- [RKNN Toolkit2](https://github.com/airockchip/rknn-toolkit2)
+- [Rockchip 官方文档](https://opensource.rock-chips.com/)
+- [HuggingFace DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B)
+
+---
+
+*最后更新: 2026-07*
