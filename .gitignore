@@ -1,9 +1,11 @@
 # 大模型权重
-model/*/model.safetensors
-model/*/*.bin
-model/*/*.pth
-model/*/*.ckpt
-model/*/output/*.rkllm
+**/model.safetensors
+**/model-*-of-*.safetensors
+**/model.safetensors.index.json
+**/*.bin
+**/*.pth
+**/*.ckpt
+**/output/*.rkllm
 *.rkllm
 
 # SDK（从 Rockchip 官方下载）

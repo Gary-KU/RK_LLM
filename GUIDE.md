@@ -8,13 +8,14 @@
 
 1. [环境搭建](#1-环境搭建)
 2. [下载模型](#2-下载模型)
-3. [模型转换（量化）](#3-模型转换量化)
-4. [编译板端程序](#4-编译板端程序)
-5. [板端部署与运行](#5-板端部署与运行)
-6. [跨平台迁移指南](#6-跨平台迁移指南)
-7. [支持的模型与芯片](#7-支持的模型与芯片)
-8. [项目结构说明](#8-项目结构说明)
-9. [常见问题](#9-常见问题)
+3. [导入新模型（通用流程）](#3-导入新模型通用流程)
+4. [模型转换（量化）](#4-模型转换量化)
+5. [编译板端程序](#5-编译板端程序)
+6. [板端部署与运行](#6-板端部署与运行)
+7. [跨平台迁移指南](#7-跨平台迁移指南)
+8. [支持的模型与芯片](#8-支持的模型与芯片)
+9. [项目结构说明](#9-项目结构说明)
+10. [常见问题](#10-常见问题)
 
 ---
 
@@ -102,9 +103,128 @@ git clone https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 
 ---
 
-## 3. 模型转换（量化）
+## 3. 导入新模型（通用流程）
 
-### 3.1 转换流程图
+> 本节以 Qwen3-4B 为例，完整演示从零接入一个新模型的全过程。
+
+### 3.1 第一步：确定模型名称
+
+在 HuggingFace 上搜索模型时，精确名称容易被截断或混淆。可靠做法：
+
+```bash
+# 用 hf 命令列出所有相关模型（显示完整 ID）
+hf models ls --search "Qwen3 4B" --author Qwen --no-truncate
+```
+
+输出中重点关注 `LIKES` 排行靠前的 `text-generation` 标签模型。例如：
+
+| ID | Likes | 说明 |
+|----|-------|------|
+| `Qwen/Qwen3-4B-Instruct-2507` | 902 | ✅ 要用这个 |
+| `Qwen/Qwen3-4B` | 662 | Base 模型，未指令微调 |
+
+> **教训**: 不要凭猜测写模型名。先 `hf models ls --search` 确认精确 ID。
+
+### 3.2 第二步：下载模型
+
+```bash
+cd model/
+
+# 方式1: hf 命令行（推荐，支持断点续传）
+export HF_ENDPOINT=https://hf-mirror.com
+hf download Qwen/Qwen3-4B-Instruct-2507 --local-dir ./Qwen3-4B-Instruct
+
+# 方式2: Python API（国内网络更稳）
+python3 << PYEOF
+from huggingface_hub import snapshot_download
+import os
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+snapshot_download("Qwen/Qwen3-4B-Instruct-2507", local_dir="./Qwen3-4B-Instruct")
+PYEOF
+```
+
+> **网络问题**: 国内直连 HF 大概率失败。务必设置 `HF_ENDPOINT=https://hf-mirror.com` 镜像，或使用 ModelScope。
+
+### 3.3 第三步：创建转换脚本
+
+复制模板并修改 4 个关键参数：
+
+```bash
+cp scripts/export.py scripts/export_YOUR_MODEL.py
+```
+
+需要修改的位置及含义：
+
+```python
+# ====== 第 11 行: 模型路径 ======
+modelpath = '/home/.../model/Qwen3-4B-Instruct'   # 改成你的模型目录
+
+# ====== 第 20 行: 加载参数 ======
+ret = llm.load_huggingface(
+    model=modelpath,
+    device='cpu',       # CPU 稳定但慢 | CUDA 快但需显卡
+    dtype="float32"     # CPU 必须用 float32 | CUDA 可用 float16
+)
+
+# ====== 第 34-38 行: 量化参数 ======
+target_platform = "RK3588"    # 你的芯片型号
+quantized_dtype = "W8A8"      # 量化方式（查下表）
+num_npu_core = 3              # NPU 核数
+max_context = 8192            # 根据板子内存调整
+```
+
+### 3.4 第四步：选择量化方案（关键！）
+
+**不同芯片支持的量化类型不同，选错直接报错**：
+
+| 芯片 | 支持 W8A8 | 支持 W4A16 | 推荐方案 | 4B 模型占用 |
+|------|----------|-----------|---------|------------|
+| RK3588 | ✅ | ❌ (需 W4A16_GX) | `W8A8 + normal` | ~4GB |
+| RK3576 | ✅ | ✅ | `W4A16 + grq` | ~2GB |
+| RK3562 | ✅ | ❌ | `W8A8 + normal` | ~4GB |
+
+对应代码：
+```python
+# RK3588 / RK3562
+quantized_dtype = "W8A8"
+quantized_algorithm = "normal"
+
+# RK3576（更省内存）
+quantized_dtype = "W4A16"
+quantized_algorithm = "grq"
+```
+
+### 3.5 内存预算速查
+
+| 模型参数量 | FP32 大小 | W8A8 大小 | 推荐板载内存 |
+|-----------|----------|----------|-------------|
+| 0.5B | 2GB | 0.5GB | 2GB+ |
+| 1.5B | 6GB | 1.5GB | 4GB+ |
+| 3B-4B | 12-16GB | 3-4GB | 8GB+ |
+| 7B | 28GB | 7GB | 16GB+ |
+
+> 加上运行时开销（上下文缓存 + 系统），建议板载内存 ≥ 模型大小 × 2。
+
+### 3.6 支持的模型架构速查
+
+| 架构 | 模型名示例 | 备注 |
+|------|---------|------|
+| Qwen3 | `Qwen/Qwen3-4B-Instruct-2507` | 需用完整名 |
+| Qwen2/2.5 | `Qwen/Qwen2.5-1.5B-Instruct` | |
+| DeepSeek-R1 | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | Distill 版 |
+| LLaMA | `meta-llama/Llama-3.2-1B` | |
+| Phi | `microsoft/Phi-3-mini-4k-instruct` | |
+| Gemma | `google/gemma-2-2b-it` | |
+| ChatGLM3 | `THUDM/chatglm3-6b` | 仅 6B 版 |
+| InternLM2 | `internlm/internlm2-1.8b` | |
+| MiniCPM | `openbmb/MiniCPM3-4B` | |
+| RWKV7 | `fla-hub/rwkv-7` | 需 Python 3.12 |
+
+---
+
+## 4. 模型转换（量化）
+
+### 4.1 转换流程图
 
 ```
 HuggingFace 模型 (FP16/FP32)
@@ -122,7 +242,7 @@ HuggingFace 模型 (FP16/FP32)
 推送到 RK3588 板端推理
 ```
 
-### 3.2 运行转换
+### 4.2 运行转换
 
 ```bash
 cd scripts/
@@ -134,7 +254,7 @@ conda activate rkllm
 python export.py
 ```
 
-### 3.3 转换参数说明
+### 4.3 转换参数说明
 
 `scripts/export.py` 中的关键参数：
 
@@ -152,7 +272,7 @@ num_npu_core = 3             # NPU 核数
 max_context = 4096           # 最大上下文长度
 ```
 
-### 3.4 预期输出
+### 4.4 预期输出
 
 ```
 INFO: rkllm-toolkit version: 1.3.0
@@ -166,9 +286,9 @@ Model saved to: ../model/DeepSeek-R1-Distill-Qwen-1.5B/output/
 
 ---
 
-## 4. 编译板端程序
+## 5. 编译板端程序
 
-### 4.1 Android 编译
+### 5.1 Android 编译
 
 ```bash
 cd scripts/
@@ -185,7 +305,7 @@ deploy/android/
     └── libomp.so     # OpenMP 运行时
 ```
 
-### 4.2 Linux 编译
+### 5.2 Linux 编译
 
 如果你的板子跑的是 Linux 系统：
 
@@ -200,9 +320,9 @@ cd scripts/
 
 ---
 
-## 5. 板端部署与运行
+## 6. 板端部署与运行
 
-### 5.1 推送文件
+### 6.1 推送文件
 
 ```bash
 # 推 Android 二进制
@@ -215,7 +335,7 @@ adb push ../model/DeepSeek-R1-Distill-Qwen-1.5B/output/*.rkllm /data/android/
 adb push ../sdk/scripts/fix_freq_rk3588.sh /data/android/
 ```
 
-### 5.2 板端运行
+### 6.2 板端运行
 
 ```bash
 adb shell
@@ -236,7 +356,7 @@ export RKLLM_LOG_LEVEL=1
 
 用法: `./llm_demo <模型文件> <max_new_tokens> <max_context_len>`
 
-### 5.3 预期输出
+### 6.3 预期输出
 
 ```
 rkllm init start
@@ -259,9 +379,9 @@ robot: <think>
 
 ---
 
-## 6. 跨平台迁移指南
+## 7. 跨平台迁移指南
 
-### 6.1 更换芯片
+### 7.1 更换芯片
 
 当你要从 RK3588 切换到其他芯片时，只需修改 `scripts/export.py` 中的 3 个参数：
 
@@ -279,7 +399,7 @@ num_npu_core = 2              # 3 → 2
 | RK3562 | `"RK3562"` | `"W8A8"` | `1` |
 | RV1126B | `"RV1126B"` | `"W8A8"` | `1` |
 
-### 6.2 更换模型
+### 7.2 更换模型
 
 替换模型只需改 `scripts/export.py` 第 11 行的 `modelpath`：
 
@@ -294,7 +414,7 @@ modelpath = '/path/to/Qwen2.5-1.5B-Instruct'
 modelpath = '/path/to/Llama-3.2-3B'
 ```
 
-### 6.3 编译目标切换
+### 7.3 编译目标切换
 
 `scripts/build-android.sh` 中的关键变量：
 
@@ -304,7 +424,7 @@ modelpath = '/path/to/Llama-3.2-3B'
 | `CMAKE_SYSTEM_NAME` | `Android` | `Linux` |
 | `TARGET_ARCH` | `arm64-v8a` | `aarch64` |
 
-### 6.4 修改编译目标架构
+### 7.4 修改编译目标架构
 
 在 `build-android.sh` 第 8 行：
 ```bash
@@ -319,9 +439,9 @@ GCC_COMPILER_PATH=/your/toolchain/path/bin/aarch64-none-linux-gnu
 
 ---
 
-## 7. 支持的模型与芯片
+## 8. 支持的模型与芯片
 
-### 7.1 模型架构支持表
+### 8.1 模型架构支持表
 
 基于 **RKLLM SDK v1.3.0**：
 
@@ -352,7 +472,7 @@ GCC_COMPILER_PATH=/your/toolchain/path/bin/aarch64-none-linux-gnu
 | DeepSeekOCR | ✅ OCR 识别 |
 | SmolVLM | ✅ 图像理解 |
 
-### 7.2 添加自定义模型
+### 8.2 添加自定义模型
 
 对于不在官方支持列表中的模型，可以通过 `model/custom/` 目录提供自定义定义：
 
@@ -377,7 +497,7 @@ ret = llm.load_huggingface(
 
 ---
 
-## 8. 项目结构说明
+## 9. 项目结构说明
 
 ```
 rkllm-quickstart/
@@ -421,7 +541,7 @@ rkllm-quickstart/
 
 ---
 
-## 9. 常见问题
+## 10. 常见问题
 
 ### Q1: 模型转换报 "target_platform not support quantized_dtype"
 
