@@ -116,23 +116,47 @@ export RKLLM_LOG_LEVEL=1
 
 ---
 
-## 跨平台 / 跨芯片迁移
+## 切换模型 / 芯片
 
-只需修改 `scripts/export.py` 三个参数：
+### 换芯片 — 改 3 个参数（`scripts/export.py`）
 
 ```python
-target_platform = "RK3588"   # ← 改成你的芯片: RK3576 / RK3562 / RV1126B
-quantized_dtype = "W8A8"     # ← RK3588 用 W8A8, RK3576 可选 W4A16
-num_npu_core = 3             # ← RK3588=3, RK3576=2, RK3562=1
+target_platform = "RK3588"   # RK3588 | RK3576 | RK3562 | RV1126B
+quantized_dtype = "W8A8"     # RK3588→W8A8, RK3576→W4A16 更省内存
+num_npu_core = 3             # RK3588=3, RK3576=2, RK3562=1
 ```
 
-编译时用对应的定频脚本：
+### 换模型 — 改 1 行 + 创建新脚本
+
 ```bash
-# RK3588
-sh fix_freq_rk3588.sh
-# RK3576
-sh fix_freq_rk3576.sh
+# 复制模板
+cp scripts/export.py scripts/export_qwen3.py
+
+# 编辑第 11 行:
+#   modelpath = '.../model/Qwen3-4B-Instruct'
+# 第 20 行:
+#   dtype="float32"          # CPU 必须 float32，CUDA 可用 float16
+# 第 41 行:
+#   max_context=8192         # 4B 模型加大上下文
 ```
+
+### 量化兼容表（选错直接报错）
+
+| 芯片 | W8A8 | W4A16 | 推荐 |
+|------|:----:|:-----:|------|
+| RK3588 | ✅ | ❌ | `W8A8 normal` |
+| RK3576 | ✅ | ✅ | `W4A16 grq` |
+| RK3562 | ✅ | ❌ | `W8A8 normal` |
+| RV1126B | ✅ | ❌ | `W8A8 normal` |
+
+### 模型参数对照
+
+| 模型 | modelpath | max_context | 板载内存建议 |
+|------|-----------|-------------|------------|
+| DeepSeek-R1-1.5B | `.../model/DeepSeek-R1-Distill-Qwen-1.5B` | 4096 | 4GB+ |
+| Qwen3-4B-Instruct | `.../model/Qwen3-4B-Instruct` | 8192 | 8GB+ |
+
+> 更多详见 **[GUIDE.md 第 3 章](./GUIDE.md)**
 
 ---
 
