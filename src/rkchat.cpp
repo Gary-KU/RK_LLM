@@ -124,11 +124,18 @@ static bool mem_guard_check(const char* model_path) {
 // Detect model family from filename and set chat template markers
 static void detect_model_template(const char* model_path) {
     string path(model_path);
-    // Qwen3 family (includes DeepSeek-R1-Distill-Qwen)
+    // DeepSeek-R1 — full-width pipe markers (hex-escaped for encoding safety)
+    // <FF5C> is full-width vertical bar U+FF5C (0xEF 0xBC 0x9C in UTF-8)
+    if (path.find("DeepSeek") != string::npos) {
+        g_chat_prefix  = "\x3C\xEF\xBC\x9C" "User" "\xEF\xBC\x9C\x3E";
+        g_chat_postfix = "\x3C\xEF\xBC\x9C" "Assistant" "\xEF\xBC\x9C\x3E";
+        cout << DIM "  Template: DeepSeek-R1" RST << endl;
+        return;
+    }
+
+    // Qwen3 family (pure instruct, no reasoning)
     if (path.find("Qwen")  != string::npos ||
-        path.find("qwen")  != string::npos ||
-        path.find("DeepSeek") != string::npos) {
-        // Qwen3 uses <|im_start|>role\n...<|im_end|>\n format
+        path.find("qwen")  != string::npos) {
         g_chat_prefix  = "<|im_start|>user\n";
         g_chat_postfix = "<|im_end|>\n<|im_start|>assistant\n";
         cout << DIM "  Template: Qwen3 (im_start/end)" RST << endl;
@@ -390,7 +397,15 @@ static int on_res(RKLLMResult* r, void*, LLMCallState st) {
     }
     if (st == RKLLM_RUN_NORMAL) {
         if (r->text) {
-            if (!g_warmup_mode) cout << r->text << flush;
+            if (!g_warmup_mode) {
+                // Strip leaked special tokens (<|im_end|>, <think>, etc.)
+                string_view sv(r->text);
+                if (sv.find("<|im_") == string_view::npos &&
+                    sv.find("<think") == string_view::npos &&
+                    sv.find("</think") == string_view::npos &&
+                    sv.find("<｜end▁of▁thinking｜>") == string_view::npos)
+                    cout << r->text << flush;
+            }
             g_out_toks++;
         }
     } else if (st == RKLLM_RUN_FINISH) {
@@ -680,6 +695,9 @@ int main(int argc, char** argv) {
             g_recover_armed = false;
             cerr << YEL "\n  ⚠ Recovered from tokenizer error, auto-clearing..." RST "\n";
             rkllm_clear_kv_cache(g_h, 0, nullptr, nullptr);
+            // Re-set template to reset tokenizer internal state
+            if (g_chat_prefix && g_chat_postfix)
+                rkllm_set_chat_template(g_h, g_sys_prompt.c_str(), g_chat_prefix, g_chat_postfix);
             continue;
         }
         g_recover_armed = false;
