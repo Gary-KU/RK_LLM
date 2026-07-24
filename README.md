@@ -132,6 +132,23 @@ export LD_LIBRARY_PATH=./lib
 | 峰值内存 | 5.2 GB |
 | 数学题 (预处理) | <1ms, 100% 准确 |
 
+### 源码与自定义
+
+源码只有一个文件：**`src/rkchat.cpp`**（编译时复制到 `sdk/examples/rkllm_api_demo/deploy/src/rkchat.cpp`）。改完重编即可。
+
+| 想改什么 | 搜什么 | 说明 |
+|----------|--------|------|
+| 默认系统提示词 | `g_sys_prompt =` | 改第 55 行附近 |
+| 采样参数 / 预设 | `PRESETS[]` | 4 档预设 precise/balanced/creative/mirostat |
+| 新增命令 | `if (s == "/help")` | 在 `cmd()` 函数里加 |
+| 启动 banner | `print_banner()` | 改 ASCII art |
+| 数学预处理 | `preprocess_input()` | 拦截数学表达式 |
+| 内存保护阈值 | `mem_guard_check()` | `safe_margin = 2048` 改 2GB 阈值 |
+| 模型模板标记 | `detect_model_template()` | Qwen3/LLaMA/ChatGLM 自动匹配 |
+| 颜色主题 | `#define CLR_` | ANSI 转义码 |
+
+编译推送一条龙：`cd scripts && ./build-android.sh && adb push ../deploy/android/rkchat /sdcard/android/`
+
 > 📖 **完整优化教程**: **[docs/PERFORMANCE.md](./docs/PERFORMANCE.md)** — 12 章节，从 0 到生产级的完整优化历程
 
 ---
