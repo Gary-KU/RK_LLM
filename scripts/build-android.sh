@@ -32,7 +32,7 @@ make install
 # CMakeLists.txt 硬编码了安装路径，手动复制到项目 deploy/
 OUT_DIR=${SOURCE_DIR}/install/demo_Android_${TARGET_ARCH}
 mkdir -p "${INSTALL_DIR}"/lib
-cp -v "${OUT_DIR}"/llm_demo "${INSTALL_DIR}"/
+cp -v "${OUT_DIR}"/rkchat "${INSTALL_DIR}"/
 cp -v "${OUT_DIR}"/lib/librkllmrt.so "${INSTALL_DIR}"/lib/
 # 补充 libomp.so（NDK 中的 OpenMP 运行时）
 cp -v "${PROJECT_DIR}"/sdk/rkllm-runtime/Android/librkllm_api/arm64-v8a/libomp.so "${INSTALL_DIR}"/lib/ 2>/dev/null || true

@@ -157,6 +157,8 @@ cp scripts/export.py scripts/export_qwen3.py
 | Qwen3-4B-Instruct | `.../model/Qwen3-4B-Instruct` | 8192 | 8GB+ |
 
 > 更多详见 **[GUIDE.md 第 3 章](./GUIDE.md)**
+>
+> 📖 **性能优化实战教程**: **[docs/PERFORMANCE.md](./docs/PERFORMANCE.md)** — 从 0 到生产级的完整优化历程
 
 ---
 
