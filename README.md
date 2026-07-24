@@ -84,6 +84,57 @@ export RKLLM_LOG_LEVEL=1
 ```
 
 ---
+## rkchat — 生产级聊天工具
+
+> `rkchat` 是从官方 demo 深度优化而来的专业交互式聊天程序，已集成到本仓库。
+
+### 特性
+
+| 功能 | 说明 |
+|------|------|
+| 🛡️ **内存保护** | 启动前检查 /proc/meminfo，内存不足直接拒绝加载 |
+| 🔥 **Warmup 预热** | 静默推理预热 NPU 缓存，消除首轮冷启动 |
+| 📊 **性能统计** | 实时 TTFT / Prefill / Decode / 内存 / KV 用量 |
+| 📐 **数学预处理** | 检测数学表达式→直接计算→秒出结果，零推理耗时 |
+| 💥 **崩溃恢复** | sigsetjmp 兜底，tokenizer 异常不崩，自动清理重试 |
+| 🔀 **模型模板自动匹配** | 自动识别 Qwen3 / LLaMA / ChatGLM 并匹配模板标记 |
+| 🎛️ **4 档采样预设** | `/preset precise\|balanced\|creative\|mirostat` |
+| 💬 **多轮对话** | `/history on\|off` 切换，KV Cache 可视化监控 |
+| 🧠 **思考模式** | `/think on` 启用 Qwen3 thinking |
+| 🌐 **中英切换** | `/zh` `/en` 快捷切换系统提示词 |
+
+### 快速使用
+
+```bash
+# 编译
+cd scripts && ./build-android.sh
+
+# 推送
+adb push ../deploy/android/rkchat /data/local/tmp/android/
+adb push ../deploy/android/lib/ /data/local/tmp/android/lib/
+adb push ../model/Qwen3-4B-Instruct/output/*.rkllm /data/local/tmp/android/
+
+# 启动
+adb shell
+cd /data/local/tmp/android
+export LD_LIBRARY_PATH=./lib
+./rkchat Qwen3-4B-Instruct_W8A8_RK3588.rkllm 4096 8192
+```
+
+### 性能基线 (Qwen3-4B W8A8 @ RK3588)
+
+| 指标 | 实测值 |
+|------|--------|
+| 模型加载 | 4.8-5.2s |
+| TTFT (首 token) | 400-650ms |
+| Prefill 速度 | 45-93 tok/s |
+| **Decode 速度** | **4.7-5.0 tok/s** |
+| 峰值内存 | 5.2 GB |
+| 数学题 (预处理) | <1ms, 100% 准确 |
+
+> 📖 **完整优化教程**: **[docs/PERFORMANCE.md](./docs/PERFORMANCE.md)** — 12 章节，从 0 到生产级的完整优化历程
+
+---
 
 ## 支持的模型
 
