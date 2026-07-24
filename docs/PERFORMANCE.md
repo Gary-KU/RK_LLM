@@ -19,6 +19,7 @@
    - [2.7 中断信号处理](#27-中断信号处理)
    - [2.8 内存保护机制](#28-内存保护机制)
    - [2.9 Prompt Cache](#29-prompt-cache)
+   - [2.10 模型模板自动匹配](#210-模型模板自动匹配)
 3. [失败的优化尝试](#3-失败的优化尝试)
 4. [性能基线](#4-性能基线)
 5. [代码变更总览](#5-代码变更总览)
@@ -675,6 +676,91 @@ int    g_max_ctx, g_max_new, g_n_batch, g_preset_idx;
 2. **换芯片** → RK3576 支持 W4A16，内存减半速度加倍
 3. **等 SDK 更新** → `n_batch`、CPU affinity 开放后可能有 10-20% 提升
 4. **多 NPU 并行** → 用多块 RK3588 做流水线（复杂但可行）
+
+### 2.10 模型模板自动匹配
+
+**问题**：`rkllm_set_chat_template` 的 `prompt_prefix` / `prompt_postfix` 参数不同模型有不同的格式要求。换模型时必须同步修改这两处，否则要么崩溃，要么模板标记泄漏到输出里。
+
+**踩过的坑**：
+
+| 阶段 | 设置 | 结果 |
+|------|------|------|
+| 初版 | `"", ""` (空字符串) | 中文输入 → `invalid character` 崩溃 |
+| 二版 | `<｜User｜>`, `<｜Assistant｜>` (Qwen1/2 格式) | 模板标记泄漏到输出，出现 `<｜User｜>请写诗...` |
+| 终版 | `<\|im_start\|>user\n`, `<\|im_end\|>\n<\|im_start\|>assistant\n` | ✅ 正常 |
+
+**Qwen 各代模板格式差异**：
+
+```
+Qwen1/2 (旧):
+  <|im_start|>system\n...<|im_end|>\n
+  <|im_start|>user\n...<|im_end|>\n
+  <|im_start|>assistant\n...
+  提示: 内置 token 也用 <｜User｜>/<｜Assistant｜> 全角竖线变体
+
+Qwen3 (新):
+  同样使用 <|im_start|>/<|im_end|> 体系
+  但 toknenizer_config.json 中的 chat_template 明确指定了格式
+  旧的全角竖线变体不再识别 → 导致模板泄漏
+
+LLaMA:
+  <s>[INST] {user} [/INST] {assistant} </s>
+
+ChatGLM:
+  [Round 1]\n\n问：{user}\n\n答：{assistant}
+```
+
+**自动检测实现**：
+
+```cpp
+// 从模型文件名推断模板格式
+static void detect_model_template(const char* model_path) {
+    string path(model_path);
+
+    // Qwen3 家族 (含 DeepSeek-R1-Distill-Qwen)
+    if (path.find("Qwen")  != string::npos ||
+        path.find("qwen")  != string::npos ||
+        path.find("DeepSeek") != string::npos) {
+        g_chat_prefix  = "<|im_start|>user\n";
+        g_chat_postfix = "<|im_end|>\n<|im_start|>assistant\n";
+        return;
+    }
+
+    // LLaMA 家族
+    if (path.find("LLaMA") != string::npos || ...) {
+        g_chat_prefix  = "<s>[INST] ";
+        g_chat_postfix = " [/INST]";
+        return;
+    }
+
+    // ChatGLM 家族
+    if (path.find("ChatGLM") != string::npos || ...) {
+        g_chat_prefix  = "[Round 1]\n\n问：";
+        g_chat_postfix = "\n\n答：";
+        return;
+    }
+
+    // 未知模型 → 不自定义模板，使用模型内置默认
+    g_chat_prefix  = nullptr;
+    g_chat_postfix = nullptr;
+}
+```
+
+**使用方式**：在 `rkllm_init` 之后、首次推理之前调用：
+
+```cpp
+detect_model_template(model_path);
+if (g_chat_prefix && g_chat_postfix)
+    rkllm_set_chat_template(g_h, g_sys_prompt.c_str(),
+                            g_chat_prefix, g_chat_postfix);
+```
+
+**效果**：
+- 换模型只需改文件名，模板自动匹配
+- 未知模型降级为不自定义模板，使用 tokenizer 内置默认
+- `/system` 命令修改系统提示词时，自动复用已检测的模板格式
+
+---
 
 ### 6.4 工程实践原则
 

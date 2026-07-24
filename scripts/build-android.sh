@@ -36,6 +36,8 @@ cp -v "${OUT_DIR}"/rkchat "${INSTALL_DIR}"/
 cp -v "${OUT_DIR}"/lib/librkllmrt.so "${INSTALL_DIR}"/lib/
 # 补充 libomp.so（NDK 中的 OpenMP 运行时）
 cp -v "${PROJECT_DIR}"/sdk/rkllm-runtime/Android/librkllm_api/arm64-v8a/libomp.so "${INSTALL_DIR}"/lib/ 2>/dev/null || true
+# 设备端快捷启动脚本
+cp -v "${SCRIPT_DIR}"/rkchat-device.sh "${INSTALL_DIR}"/rkchat.sh 2>/dev/null || true
 
 echo "Done! Output: ${INSTALL_DIR}"
 ls -la "${INSTALL_DIR}"

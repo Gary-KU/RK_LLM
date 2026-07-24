@@ -34,9 +34,27 @@
 #include <algorithm>
 #include <fstream>
 #include <sys/stat.h>
+#include <exception>
+#include <setjmp.h>
+#include <cstdio>
+#include <cctype>
+#include <cmath>
 
 using namespace std;
 using namespace std::chrono;
+
+// Non-local jump target for recovering from C-library aborts
+static sigjmp_buf g_recover_jmp;
+static volatile bool g_recover_armed = false;
+
+static void on_terminate_handler() {
+    if (g_recover_armed) siglongjmp(g_recover_jmp, 1);
+    abort();  // fallback
+}
+static void on_sigabrt_handler(int) {
+    if (g_recover_armed) siglongjmp(g_recover_jmp, 1);
+    _exit(1);  // fallback
+}
 
 // ====================================================================
 // ANSI Colors
@@ -52,6 +70,10 @@ using namespace std::chrono;
 #define CYN   "\033[36m"
 #define WHT   "\033[37m"
 #define GRAY  "\033[90m"
+
+// Forward declarations for functions before globals
+static const char* g_chat_prefix  = nullptr;
+static const char* g_chat_postfix = nullptr;
 
 // ====================================================================
 // Memory Guard — professional pre-flight safety check
@@ -99,6 +121,42 @@ static bool mem_guard_check(const char* model_path) {
     return true;
 }
 
+// Detect model family from filename and set chat template markers
+static void detect_model_template(const char* model_path) {
+    string path(model_path);
+    // Qwen3 family (includes DeepSeek-R1-Distill-Qwen)
+    if (path.find("Qwen")  != string::npos ||
+        path.find("qwen")  != string::npos ||
+        path.find("DeepSeek") != string::npos) {
+        // Qwen3 uses <|im_start|>role\n...<|im_end|>\n format
+        g_chat_prefix  = "<|im_start|>user\n";
+        g_chat_postfix = "<|im_end|>\n<|im_start|>assistant\n";
+        cout << DIM "  Template: Qwen3 (im_start/end)" RST << endl;
+        return;
+    }
+    // LLaMA family
+    if (path.find("LLaMA") != string::npos ||
+        path.find("llama") != string::npos ||
+        path.find("TinyLLAMA") != string::npos) {
+        g_chat_prefix  = "<s>[INST] ";
+        g_chat_postfix = " [/INST]";
+        cout << DIM "  Template: LLaMA" RST << endl;
+        return;
+    }
+    // ChatGLM family
+    if (path.find("ChatGLM") != string::npos ||
+        path.find("chatglm") != string::npos) {
+        g_chat_prefix  = "[Round 1]\n\n问：";
+        g_chat_postfix = "\n\n答：";
+        cout << DIM "  Template: ChatGLM" RST << endl;
+        return;
+    }
+    // Unknown model — use built-in default template
+    g_chat_prefix  = nullptr;
+    g_chat_postfix = nullptr;
+    cout << DIM "  Template: auto (model default)" RST << endl;
+}
+
 // ====================================================================
 // Globals
 // ====================================================================
@@ -122,8 +180,10 @@ static float  g_mem_mb     = 0;
 static bool   g_history     = true;
 static bool   g_thinking    = false;
 static bool   g_warmup_mode = false;  // suppress output during warmup
-static string g_sys_prompt  = "You are a helpful, respectful and honest AI assistant. "
-                               "Answer concisely and accurately.";
+
+// Chat template markers — declared above (before mem_guard)
+
+static string g_sys_prompt  = "你是一个乐于助人的AI助手。请用中文简洁、准确地回答问题。不知道就说不知道。";
 
 static int    g_max_ctx     = 8192;
 static int    g_max_new     = 4096;
@@ -176,6 +236,95 @@ static string fm(float mb) {
     if (mb < 1024) return to_string((int)mb) + "MB";
     ostringstream o; o << fixed << setprecision(1) << (mb/1024.f) << "GB"; return o.str();
 }
+// Simple recursive-descent math parser — no shell, no awk, 100% safe
+static double eval_expr(const char*& p);
+static double eval_term(const char*& p);
+static double eval_factor(const char*& p);
+
+static void skip_ws(const char*& p) { while (*p == ' ') p++; }
+
+static double eval_num(const char*& p) {
+    skip_ws(p);
+    char* end;
+    double v = strtod(p, &end);
+    if (end == p) return NAN;
+    p = end;
+    skip_ws(p);
+    return v;
+}
+
+static double eval_factor(const char*& p) {
+    skip_ws(p);
+    if (*p == '(') { p++; double v = eval_expr(p); skip_ws(p); if (*p == ')') p++; return v; }
+    return eval_num(p);
+}
+
+static double eval_term(const char*& p) {
+    double v = eval_factor(p);
+    while (true) {
+        skip_ws(p);
+        if (*p == '*' || *p == '/') { char op = *p++; double rhs = eval_factor(p); v = (op=='*') ? v*rhs : v/rhs; }
+        else break;
+    }
+    return v;
+}
+
+static double eval_expr(const char*& p) {
+    double v = eval_term(p);
+    while (true) {
+        skip_ws(p);
+        if (*p == '+' || *p == '-') { char op = *p++; double rhs = eval_term(p); v = (op=='+') ? v+rhs : v-rhs; }
+        else break;
+    }
+    return v;
+}
+
+// Pre-process user input: detect math expressions and compute them
+static string preprocess_input(const string& raw) {
+    // Check for math pattern: digit(s) + operator + digit(s)
+    bool has_math = false;
+    for (size_t i = 0; i < raw.length(); i++) {
+        if (isdigit(raw[i])) {
+            for (size_t j = i; j < raw.length() && j < i + 80; j++) {
+                if (raw[j] == '+' || raw[j] == '-' || raw[j] == '*' ||
+                    raw[j] == '/' || raw[j] == 'x' || raw[j] == 'X') {
+                    has_math = true; break;
+                }
+            }
+            if (has_math) break;
+        }
+    }
+    if (!has_math) return raw;
+
+    // Extract evaluable expression
+    string expr;
+    for (char c : raw) {
+        if (isdigit(c) || c == '+' || c == '-' || c == '*' || c == '/' ||
+            c == '.' || c == '(' || c == ')' || c == ' ') expr += c;
+        else if (c == 'x' || c == 'X') expr += '*';
+    }
+
+    bool has_digit = false, has_op = false;
+    for (char c : expr) { if (isdigit(c)) has_digit = true; if (c == '+' || c == '-' || c == '*' || c == '/') has_op = true; }
+    if (!has_digit || !has_op) return raw;
+
+    // Parse & evaluate
+    const char* pp = expr.c_str();
+    double res = eval_expr(pp);
+    if (isnan(res)) return raw;
+
+    // Format result
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.10g", res);
+    string rs(buf);
+
+    cout << CYN "  🔢 " << expr << DIM " = " RST << rs << endl;
+
+    // Model often ignores precomputed results → answer directly
+    cout << BLD GRN "▸ " RST << rs << endl;
+    return "";  // empty = skip model, caller checks and continues
+}
+
 static string fs(float toks, float ms) {
     if (ms <= 0 || toks <= 0) return "--";
     ostringstream o; o << fixed << setprecision(1) << (toks/(ms/1000.f)); return o.str();
@@ -240,8 +389,10 @@ static int on_res(RKLLMResult* r, void*, LLMCallState st) {
         g_first_tok = false;
     }
     if (st == RKLLM_RUN_NORMAL) {
-        if (r->text && !g_warmup_mode) { cout << r->text << flush; }
-        if (r->text) g_out_toks++;
+        if (r->text) {
+            if (!g_warmup_mode) cout << r->text << flush;
+            g_out_toks++;
+        }
     } else if (st == RKLLM_RUN_FINISH) {
         if (!g_warmup_mode) cout << endl;
         if (r->perf.prefill_time_ms > 0)   { g_pf_ms = r->perf.prefill_time_ms;   g_pf_toks = r->perf.prefill_tokens; }
@@ -302,13 +453,25 @@ static bool cmd(const string& s) {
              << "  " CYN "/help"           RST "              Show this\n"
              << "  " CYN "/clear"          RST "              Clear conversation\n"
              << "  " CYN "/stats"          RST "              Perf breakdown + KV gauge\n"
+             << "  " CYN "/zh | /en"       RST "            Switch system prompt language\n"
              << "  " CYN "/preset <name>"  RST "          precise | balanced | creative | mirostat\n"
              << "  " CYN "/history on|off" RST "         Multi-turn toggle\n"
              << "  " CYN "/think on|off"   RST "         Qwen3 thinking mode\n"
              << "  " CYN "/system <text>"  RST "          Change system prompt\n"
-             << "  " CYN "/batch <n>"      RST "           Set prefill batch size (128/256/512)\n"
              << "  " CYN "/exit"           RST "              Quit\n"
              << endl;
+        return true;
+    }
+    if (s == "/zh" || s == "/en") {
+        g_sys_prompt = (s == "/zh")
+            ? "你是一个乐于助人的AI助手。请用中文简洁、准确地回答用户问题。不知道就说不知道。"
+            : "You are a helpful, respectful and honest AI assistant. "
+              "Answer concisely and accurately. "
+              "If you don't know something, say so.";
+        cout << GRN "  ✓ " RST << (s=="/zh"?"中文":"English") << " mode. Clearing history...\n";
+        if (g_chat_prefix && g_chat_postfix)
+            rkllm_set_chat_template(g_h, g_sys_prompt.c_str(), g_chat_prefix, g_chat_postfix);
+        rkllm_clear_kv_cache(g_h, 0, nullptr, nullptr);
         return true;
     }
     if (s == "/clear") {
@@ -351,7 +514,8 @@ static bool cmd(const string& s) {
     if (s.rfind("/system ", 0) == 0) {
         g_sys_prompt = s.substr(8);
         cout << GRN "  ✓ System prompt updated. Clearing history...\n" RST;
-        rkllm_set_chat_template(g_h, g_sys_prompt.c_str(), "", "");
+        if (g_chat_prefix && g_chat_postfix)
+            rkllm_set_chat_template(g_h, g_sys_prompt.c_str(), g_chat_prefix, g_chat_postfix);
         rkllm_clear_kv_cache(g_h, 0, nullptr, nullptr);
         return true;
     }
@@ -396,6 +560,8 @@ int main(int argc, char** argv) {
     g_cache_path = (argc >= 5) ? argv[4] : "./prompt_cache.bin";
 
     signal(SIGINT, on_sig);
+    signal(SIGABRT, on_sigabrt_handler);
+    set_terminate(on_terminate_handler);
 
     // --- Memory guard ---
     if (!mem_guard_check(model_path)) return 1;
@@ -425,8 +591,10 @@ int main(int argc, char** argv) {
     float init_s = duration<float,milli>(steady_clock::now() - t_init0).count();
     cout << GRN " done (" << ft(init_s) << ")\n" RST;
 
-    // --- System prompt ---
-    rkllm_set_chat_template(g_h, g_sys_prompt.c_str(), "", "");
+    // --- Detect model & set chat template ---
+    detect_model_template(model_path);
+    if (g_chat_prefix && g_chat_postfix)
+        rkllm_set_chat_template(g_h, g_sys_prompt.c_str(), g_chat_prefix, g_chat_postfix);
 
     // --- Prompt cache ---
     // Try loading existing cache (auto-save on exit)
@@ -471,11 +639,15 @@ int main(int argc, char** argv) {
         if (input == "/exit" || input == "exit") break;
         if (input[0] == '/') { cmd(input); continue; }
 
+        // --- Pre-process: detect & compute math expressions ---
+        string processed = preprocess_input(input);
+        if (processed.empty()) continue;  // math was answered directly
+
         // --- Inference ---
         RKLLMInput in; memset(&in, 0, sizeof(in));
         in.input_type   = RKLLM_INPUT_PROMPT;
         in.role         = "user";
-        in.prompt_input = input.c_str();
+        in.prompt_input = processed.c_str();
         in.enable_thinking = g_thinking;
 
         RKLLMInferParam ip; memset(&ip, 0, sizeof(ip));
@@ -498,7 +670,19 @@ int main(int argc, char** argv) {
         g_running = true;
         g_t0 = steady_clock::now();
 
-        ret = rkllm_run(g_h, &in, &ip, nullptr);
+        // sigsetjmp — catches C-library abort/terminate (can't use try-catch across extern "C")
+        g_recover_armed = true;
+        if (sigsetjmp(g_recover_jmp, 1) == 0) {
+            ret = rkllm_run(g_h, &in, &ip, nullptr);
+        } else {
+            // Recovered from abort/terminate deep inside rkllm_run
+            g_running = false;
+            g_recover_armed = false;
+            cerr << YEL "\n  ⚠ Recovered from tokenizer error, auto-clearing..." RST "\n";
+            rkllm_clear_kv_cache(g_h, 0, nullptr, nullptr);
+            continue;
+        }
+        g_recover_armed = false;
         g_running = false;
 
         if (ret != 0) { cerr << RED "❌ ret=" << ret << RST "\n"; continue; }
