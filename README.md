@@ -14,6 +14,8 @@
 rkllm-quickstart/
 ├── scripts/                ← 所有脚本集中于此
 │   ├── export.py           # 模型转换 (HuggingFace → .rkllm)
+│   ├── convert_qwen2vl.sh  # Qwen2-VL 完整转换流水线
+│   ├── export_qwen2vl_llm.py # Qwen2-VL LLM 量化导出
 │   ├── quant_data.py       # 生成量化校准数据
 │   ├── build-android.sh    # 编译 Android 可执行文件
 │   ├── build-linux.sh      # 编译 Linux 可执行文件
@@ -23,6 +25,7 @@ rkllm-quickstart/
 │   │   └── output/                     # 转换产物 .rkllm
 │   └── custom/             # 自定义模型配置文件
 ├── deploy/                 ← 编译后自动生成（可推板）
+├── docs/QWEN2_VL_DEPLOYMENT.md # Qwen2-VL 多模态部署实测手册
 ├── GUIDE.md                ← 详细使用手册（图文）
 └── README.md               ← 本文件
 ```
@@ -82,6 +85,41 @@ export LD_LIBRARY_PATH=./lib
 export RKLLM_LOG_LEVEL=1
 ./llm_demo <model>.rkllm 2048 4096
 ```
+
+---
+## Qwen2-VL 多模态部署（RK3588 实测）
+
+Qwen2-VL 不能只生成一个模型文件。视觉编码器转换为 `.rknn`，语言模型转换为 `.rkllm`，板端 demo 再把两者串联起来：
+
+```text
+图片 -> Vision Encoder (.rknn) -> image embeddings
+                                     + prompt -> LLM (.rkllm) -> 回答
+```
+
+当前实测组合：
+
+| 项目 | 版本或配置 |
+|------|------------|
+| 模型 | `Qwen/Qwen2-VL-2B-Instruct` |
+| 目标芯片 | RK3588，3 NPU 核 |
+| 量化 | W8A8 |
+| RKLLM Toolkit | 1.3.0 |
+| Transformers / PyTorch | 5.8.0 / 2.6.0 |
+| RKNN Toolkit2 | 2.3.2 |
+
+```bash
+cd /path/to/RK_LLM
+bash scripts/convert_qwen2vl.sh
+```
+
+核心产物：
+
+- `model/Qwen/Qwen2-VL-2B-Instruct/output/qwen2_vl_2b_vision_rk3588.rknn`
+- `model/Qwen/Qwen2-VL-2B-Instruct/output/Qwen2-VL-2B-Instruct_w8a8_RK3588.rkllm`
+
+`rkllm-toolkit only exports Qwen2ForCausalLM...` 是预期提示：视觉部分由 RKNN 单独承载。`mrope_section` 兼容修复已经集成在 `scripts/export_qwen2vl_llm.py`，不要再手工修改模型的 `config.json`。
+
+完整的服务器转换、Windows `X:` 取件、`adb` 推板和故障排查步骤见 **[Qwen2-VL 多模态部署实测手册](./docs/QWEN2_VL_DEPLOYMENT.md)**。
 
 ---
 ## rkchat — 生产级聊天工具
@@ -170,6 +208,8 @@ export LD_LIBRARY_PATH=./lib
 | DeepSeek-R1-Distill | |
 | SmolLM3 | |
 | RWKV7 | |
+
+Qwen2-VL 的转换与板端运行方式不同于纯文本模型，详见 **[Qwen2-VL 多模态部署实测手册](./docs/QWEN2_VL_DEPLOYMENT.md)**。
 
 ---
 

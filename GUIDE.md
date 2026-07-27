@@ -16,6 +16,7 @@
 8. [支持的模型与芯片](#8-支持的模型与芯片)
 9. [项目结构说明](#9-项目结构说明)
 10. [常见问题](#10-常见问题)
+11. [Qwen2-VL 多模态部署](#11-qwen2-vl-多模态部署)
 
 ---
 
@@ -472,6 +473,8 @@ GCC_COMPILER_PATH=/your/toolchain/path/bin/aarch64-none-linux-gnu
 | DeepSeekOCR | ✅ OCR 识别 |
 | SmolVLM | ✅ 图像理解 |
 
+Qwen2-VL 需要分别生成 Vision `.rknn` 和 LLM `.rkllm`，不能套用纯文本 `rkchat` 流程。完整实测步骤见 **[Qwen2-VL 多模态部署手册](./docs/QWEN2_VL_DEPLOYMENT.md)**。
+
 ### 8.2 添加自定义模型
 
 对于不在官方支持列表中的模型，可以通过 `model/custom/` 目录提供自定义定义：
@@ -505,6 +508,9 @@ rkllm-quickstart/
 ├── scripts/                    # 所有用户脚本
 │   ├── export.py              # ★ 核心: 模型转换脚本
 │   │   # 修改: modelpath, target_platform, quantized_dtype, num_npu_core
+│   │
+│   ├── convert_qwen2vl.sh     # Qwen2-VL Vision + LLM 完整流水线
+│   ├── export_qwen2vl_llm.py  # Qwen2-VL LLM 量化与 mRoPE 兼容修复
 │   │
 │   ├── quant_data.py          # 量化校准数据生成
 │   │   # 用法: python quant_data.py -m /path/to/model
@@ -589,12 +595,35 @@ adb push deploy/android/lib/libomp.so /data/android/lib/
 
 ---
 
+## 11. Qwen2-VL 多模态部署
+
+Qwen2-VL 使用两套工具链和两个板端模型：
+
+| 阶段 | 工具链 | 输出 |
+|------|--------|------|
+| Vision + Projector | RKNN Toolkit2 2.3.2 | `.rknn` |
+| Language Model | RKLLM Toolkit 1.3.0 | `.rkllm` |
+
+RK3588 的实测配置为 W8A8、3 NPU 核。服务器端可直接运行：
+
+```bash
+cd /path/to/RK_LLM
+bash scripts/convert_qwen2vl.sh
+```
+
+RKLLM 1.3.0 会把 Qwen2-VL 的语言部分重建为 `Qwen2ForCausalLM`。旧实现会在此过程中丢失 `mrope_section`，并在优化第 1 层时报错。当前 `scripts/export_qwen2vl_llm.py` 已从原始 `text_config.rope_parameters` 恢复该字段，并完成 20 条多模态样本、28 层优化的正式验证。
+
+Windows 侧通过 `X:\RK3576\rknn\05_llm` 获取服务器产物，再使用本机 `adb` 推送到 RK3588 板。具体目录、命令、校验方法和 special token 参数统一维护在 **[Qwen2-VL 多模态部署实测手册](./docs/QWEN2_VL_DEPLOYMENT.md)**。
+
+---
+
 ## 参考资源
 
 - [RKLLM GitHub](https://github.com/airockchip/rknn-llm)
 - [RKNN Toolkit2](https://github.com/airockchip/rknn-toolkit2)
 - [Rockchip 官方文档](https://opensource.rock-chips.com/)
 - [HuggingFace DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B)
+- [Qwen2-VL 多模态部署实测手册](./docs/QWEN2_VL_DEPLOYMENT.md)
 
 ---
 

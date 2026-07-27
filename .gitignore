@@ -7,6 +7,16 @@
 **/*.ckpt
 **/output/*.rkllm
 *.rkllm
+*.rknn
+*.onnx
+*.weight
+
+# 本地模型、转换日志和实验备份
+/model/Qwen/
+/model/Qwen2-VL-2B-Instruct/
+/logs/
+/scripts/*.bak-*
+/scripts/export_vision_qwen2_fixed.py
 
 # SDK（从 Rockchip 官方下载）
 sdk/
