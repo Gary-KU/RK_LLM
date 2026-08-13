@@ -34,6 +34,13 @@ BIN_SRC="$PROJECT_DIR/deploy/android/rkchat"
 LIB_SRC="$PROJECT_DIR/deploy/android/lib"
 
 # ---- helpers ----
+cleanup_device() {
+    echo "==> Cleaning NPU..."
+    adb shell "for pid in \$(ps -A | grep -E 'rkchat|llm_demo' | awk '{print \$2}'); do kill -9 \$pid 2>/dev/null; done"
+    adb shell "[ -f /sys/kernel/debug/rknpu/reset ] && echo 1 > /sys/kernel/debug/rknpu/reset 2>/dev/null; sleep 0.5"
+    echo "     done."
+}
+
 push_build() {
     echo "==> Pushing rkchat..."
     adb push "$BIN_SRC" "$DEVICE_DIR/" >/dev/null
@@ -74,6 +81,7 @@ case "${1:-}" in
     --go)
         push_build
         push_model
+        cleanup_device
         echo "==> Launching rkchat..."
         echo "     (Ctrl+C once to stop gen, twice to quit, /exit to leave)"
         exec adb shell "cd $DEVICE_DIR && export LD_LIBRARY_PATH=./lib && ./rkchat $MODEL_FILE $MAX_TOK $CTX_LEN"

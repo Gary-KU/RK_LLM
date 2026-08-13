@@ -74,6 +74,8 @@ static void on_sigabrt_handler(int) {
 // Forward declarations for functions before globals
 static const char* g_chat_prefix  = nullptr;
 static const char* g_chat_postfix = nullptr;
+static bool        g_is_deepseek  = false;
+static bool        g_history      = true;  // forward ref for detect_model_template
 
 // ====================================================================
 // Memory Guard — professional pre-flight safety check
@@ -129,7 +131,9 @@ static void detect_model_template(const char* model_path) {
     if (path.find("DeepSeek") != string::npos) {
         g_chat_prefix  = "\x3C\xEF\xBC\x9C" "User" "\xEF\xBC\x9C\x3E";
         g_chat_postfix = "\x3C\xEF\xBC\x9C" "Assistant" "\xEF\xBC\x9C\x3E";
-        cout << DIM "  Template: DeepSeek-R1" RST << endl;
+        g_is_deepseek = true;
+        g_history = false;  // small reasoning models hallucinate in multi-turn
+        cout << DIM "  Template: DeepSeek-R1 (single-turn)" RST << endl;
         return;
     }
 
@@ -184,7 +188,7 @@ static int    g_dec_toks   = 0;    // SDK decode token count
 static float  g_mem_mb     = 0;
 
 // Settings
-static bool   g_history     = true;
+// g_history, g_is_deepseek declared above (before mem_guard)
 static bool   g_thinking    = false;
 static bool   g_warmup_mode = false;  // suppress output during warmup
 
@@ -400,10 +404,13 @@ static int on_res(RKLLMResult* r, void*, LLMCallState st) {
             if (!g_warmup_mode) {
                 // Strip leaked special tokens (<|im_end|>, <think>, etc.)
                 string_view sv(r->text);
+                // Filter leaked template tokens (fullwidth + ASCII)
                 if (sv.find("<|im_") == string_view::npos &&
-                    sv.find("<think") == string_view::npos &&
-                    sv.find("</think") == string_view::npos &&
-                    sv.find("<｜end▁of▁thinking｜>") == string_view::npos)
+                    sv.find("think") == string_view::npos &&
+                    sv.find("dof") == string_view::npos &&
+                    sv.find("User") == string_view::npos &&
+                    sv.find("用户") == string_view::npos &&
+                    sv.find("\xEF\xBC\x9C") == string_view::npos)  // fullwidth <
                     cout << r->text << flush;
             }
             g_out_toks++;

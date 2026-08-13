@@ -1,143 +1,146 @@
 ---
 name: rkllm-multimodal
 description: >
-  Deploy VL (Vision-Language) multimodal models on Rockchip NPU.
-  Covers Qwen2-VL, Qwen3-VL, InternVL, MiniCPM-V, DeepSeekOCR, SmolVLM.
-  Two-step pipeline: Vision Encoder (RKNN) + LLM (RKLLM).
-  Use when user asks about multimodal, VL, vision-language, image understanding on RK3588/RK3576.
+  Build and deploy vision-language models on Rockchip NPUs. Covers Qwen2-VL,
+  Qwen3-VL, InternVL, MiniCPM-V, DeepSeekOCR, and SmolVLM using a Vision RKNN
+  plus an LLM RKLLM. Use for multimodal conversion, quantization, demo builds,
+  Windows-to-board ADB deployment, or mRoPE failures on RK3588/RK3576.
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep
 ---
 
 # RKLLM Multimodal Deployment Skill
 
+## Canonical Guide
+
+Read `docs/QWEN2_VL_DEPLOYMENT.md` before changing Qwen2-VL scripts or running a deployment. Keep detailed commands there instead of duplicating divergent procedures in this skill.
+
 ## Architecture
 
-```
-Image (OpenCV) → Vision Encoder (RKNN) → Image Embedding
-                                               │
-                                               ▼
-                                        Concatenated to prompt
-                                               │
-Text Prompt ───────────────────────────→ LLM (RKLLM) → Response
+```text
+Image -> Vision + Projector (.rknn) -> image embeddings
+                                             |
+Text prompt ---------------------------------+-> LLM (.rkllm) -> response
 ```
 
-Two models, two toolkits:
+Do not use the text-only `rkchat` binary for multimodal inference. Build and deploy the SDK `multimodal_model_demo`.
 
-| Component | Format | Toolkit | Compile Script |
-|-----------|--------|---------|---------------|
-| Vision Encoder | `.rknn` | rknn-toolkit2 (needs `rknn_env`) | `export_vision_qwen2.py` |
-| LLM | `.rkllm` | rkllm-toolkit (needs `rkllm` env) | `export.py` |
+## Workspace Mapping
 
-## Supported VL Models
+- Linux build host: `gary@192.168.180.128`
+- Linux project: `/home/gary/RK3576/rknn/05_llm`
+- Windows product view: `X:\RK3576\rknn\05_llm`
+- Android models: `/data/models`
+- Android demo: `/data/demo_multimodal`
 
-| Model | Vision Export Script | Notes |
-|-------|---------------------|-------|
-| Qwen2-VL-2B/7B | `export_vision_qwen2.py` | Best choice for RK3588 (2B) |
-| Qwen2.5-VL, Qwen3-VL | `export_vision.py` | `--model_name qwen3-vl` |
-| InternVL2-1B, InternVL3-1B | `export_vision.py` | `--model_name internvl` |
-| MiniCPM-V-2_6 | `export_vision.py` | `--model_name minicpm` |
-| SmolVLM | `export_vision.py` | `--model_name smolvlm` |
-| DeepSeekOCR | `export_vision.py` | Needs antialias=False fix |
+Build on Linux, then use Windows `adb` to deploy. If an automation session cannot see `X:`, copy artifacts from Linux to a local staging directory with SCP. Do not assume the drive mapping exists in every Windows session.
 
-## Model Download
+## Validated Qwen2-VL Configuration
+
+| Item | Value |
+|------|-------|
+| Model | `Qwen/Qwen2-VL-2B-Instruct` |
+| Target | RK3588, 3 NPU cores |
+| Quantization | W8A8 normal |
+| RKLLM Toolkit | 1.3.0 |
+| Transformers / PyTorch | 5.8.0 / 2.6.0 |
+| RKNN Toolkit2 | 2.3.2 |
+
+Use separate `rkllm` and `rknn-toolkit2` Conda environments. Initialize Conda in non-interactive SSH sessions with:
 
 ```bash
-# modelscope (China mirror, most reliable)
-echo 'from modelscope import snapshot_download' > /tmp/dl.py
-echo 'snapshot_download("Qwen/Qwen2-VL-2B-Instruct", cache_dir="/home/gary/RK3576/rknn/05_llm/model")' >> /tmp/dl.py
-python /tmp/dl.py
-
-# Or huggingface-cli
-huggingface-cli download Qwen/Qwen2-VL-2B-Instruct \
-    --local-dir ~/RK3576/rknn/05_llm/model/Qwen2-VL-2B-Instruct \
-    --resume-download
+source /home/gary/miniconda3/etc/profile.d/conda.sh
 ```
 
-## Compilation (two steps, two envs)
+## Conversion
 
-### Step 1: Vision Encoder → RKNN (rknn-toolkit2 env)
+Run the complete resumable pipeline:
 
 ```bash
-conda activate <your_rknn_env>
-
-# First pass: generate cu_seqlens and rotary_pos_emb
-python sdk/examples/multimodal_model_demo/export/export_vision_qwen2.py \
-    --step 1 --path model/Qwen2-VL-2B-Instruct --batch 1 --height 392 --width 392
-
-# Second pass: export ONNX
-python sdk/examples/multimodal_model_demo/export/export_vision_qwen2.py \
-    --step 0 --path model/Qwen2-VL-2B-Instruct \
-    --savepath ./qwen2-vl-vision.onnx --batch 1 --height 392 --width 392
-
-# Convert ONNX to RKNN
-python sdk/examples/multimodal_model_demo/export/export_vision_rknn.py \
-    --path ./qwen2-vl-vision.onnx --model_name qwen2-vl --height 392 --width 392
+cd /home/gary/RK3576/rknn/05_llm
+bash scripts/convert_qwen2vl.sh
 ```
 
-### Step 2: LLM → RKLLM (rkllm env)
+The stages are Vision to ONNX, ONNX to RKNN, multimodal calibration plus LLM quantization, and Android demo compilation when the NDK is available.
+
+For an LLM-only rebuild:
 
 ```bash
+source /home/gary/miniconda3/etc/profile.d/conda.sh
 conda activate rkllm
-cp scripts/export.py scripts/export_qwen2vl.py
-# Edit: modelpath = 'model/Qwen2-VL-2B-Instruct', target_platform = 'RK3588'
-python scripts/export_qwen2vl.py
+cd /home/gary/RK3576/rknn/05_llm
+python scripts/export_qwen2vl_llm.py \
+  --model model/Qwen/Qwen2-VL-2B-Instruct \
+  --target rk3588 \
+  --device cpu
 ```
 
-## Build Multimodal Demo
+## RKLLM 1.3.0 mRoPE Compatibility
+
+RKLLM rebuilds `Qwen2VLForConditionalGeneration` as `Qwen2ForCausalLM`, but its optimizer still executes `Qwen2VLAttention`. The rebuilt `Qwen2Config` can lose `mrope_section`, causing:
+
+```text
+ERROR: layer running Error: 'mrope_section'!
+```
+
+`scripts/export_qwen2vl_llm.py` restores the complete dictionary from `AutoConfig.from_pretrained(model_path).text_config.rope_parameters` after `load_huggingface()` and before `build()`. Do not downgrade the toolkit-pinned Transformers version or patch the source model's `config.json` as a workaround.
+
+This warning is expected because Vision is exported separately through RKNN:
+
+```text
+rkllm-toolkit only exports Qwen2ForCausalLM of Qwen2VLForConditionalGeneration
+```
+
+## Expected Artifacts
+
+```text
+model/Qwen/Qwen2-VL-2B-Instruct/output/
+|-- qwen2_vl_2b_vision_rk3588.rknn
+`-- Qwen2-VL-2B-Instruct_w8a8_RK3588.rkllm
+```
+
+Verify exact byte counts, build-log errors, and SHA-256 before deployment.
+
+## Android Demo
 
 ```bash
-cd sdk/examples/multimodal_model_demo/deploy
+cd /home/gary/RK3576/rknn/05_llm/sdk/examples/multimodal_model_demo/deploy
 ./build-android.sh
 ```
 
-Output: `llm_vl_demo` binary
+The Android install directory is `install/demo_Android_arm64-v8a`. It must contain `demo`, `imgenc`, `demo.jpg`, and `lib/`.
+When packaging `deploy/multimodal`, also copy `sdk/rkllm-runtime/Android/librkllm_api/arm64-v8a/libomp.so` into `lib/`; `librkllmrt.so` requires it at runtime.
 
-## Deploy & Run
+## Windows ADB Deployment
 
-Push to device:
-```bash
-adb push llm_vl_demo /data/local/tmp/mm/
-adb push *.rknn /data/local/tmp/mm/
-adb push *.rkllm /data/local/tmp/mm/
-adb push test_image.jpg /data/local/tmp/mm/
-adb push 3rdparty/librknnrt/Android/arm64-v8a/librknnrt.so /data/local/tmp/mm/
-adb push 3rdparty/opencv/Android/arm64-v8a/ /data/local/tmp/mm/
+```powershell
+adb devices -l
+adb shell "mkdir -p /data/models /data/demo_multimodal"
+adb push X:\RK3576\rknn\05_llm\model\Qwen\Qwen2-VL-2B-Instruct\output\qwen2_vl_2b_vision_rk3588.rknn /data/models/
+adb push X:\RK3576\rknn\05_llm\model\Qwen\Qwen2-VL-2B-Instruct\output\Qwen2-VL-2B-Instruct_w8a8_RK3588.rkllm /data/models/
+adb push X:\RK3576\rknn\05_llm\deploy\multimodal\. /data/demo_multimodal/
 ```
 
-Run:
+Do not delete or overwrite unrelated board files. Compare local and remote sizes after each push.
+
+## Run
+
 ```bash
 adb shell
-cd /data/local/tmp/mm
-export LD_LIBRARY_PATH=.:./opencv
-./llm_vl_demo vision.rknn llm.rkllm test_image.jpg "Describe this image"
+cd /data/demo_multimodal
+chmod 755 demo imgenc
+export LD_LIBRARY_PATH=./lib
+ln -sfn /data/models models
+./demo demo.jpg \
+  models/qwen2_vl_2b_vision_rk3588.rknn \
+  models/Qwen2-VL-2B-Instruct_w8a8_RK3588.rkllm \
+  256 4096 3 rk3588 \
+  "<|vision_start|>" "<|vision_end|>" "<|image_pad|>"
 ```
 
-## Key Differences from Text-Only rkchat
+## Resource Checks
 
-| | rkchat | Multimodal Demo |
-|---|--------|----------------|
-| Vision model | None | RKNN (.rknn) |
-| Image processing | None | OpenCV |
-| Input | Text | Text + Image |
-| Dependencies | librkllmrt.so | librkllmrt.so + librknnrt.so + opencv |
-| Binary size | ~4.7MB | ~5MB + opencv libs |
-
-## Memory Requirements
-
-| Model | Vision | LLM | Total |
-|-------|--------|-----|-------|
-| Qwen2-VL-2B | ~1.5 GB | ~2.5 GB | ~4 GB |
-| Qwen2-VL-7B | ~2.5 GB | ~7 GB | ~10 GB (too big for RK3588) |
-
-RK3588 with 16GB: Qwen2-VL-2B is the sweet spot.
-
-## Troubleshooting
-
-| Issue | Fix |
-|-------|-----|
-| `rknn-toolkit2` conflicts with `rkllm-toolkit` | Use separate conda envs |
-| torch version conflict | rkllm needs torch 2.6, rknn needs torch 2.4 — separate envs mandatory |
-| `cu_seqlens` dimension mismatch | Must match batch/height/width in both step 1 and 2 |
-| `use_flash_attn` error | Set `"use_flash_attn": false` in config.json before export |
-| ONNX export fails | `pip install onnx==1.18.0` |
-| Image preprocessing wrong | Image is automatically expanded to square with padding |
+- Reserve at least 10 GB of build-host disk space. The validated output directory, including ONNX external data, uses about 5.8 GB.
+- Expect roughly 9 GB RAM usage for this 2B conversion.
+- Check `/data` before pushing approximately 3.5 GB of models.
+- Use matching RKLLM and RKNN runtime libraries from the same SDK release family.
+- Before a large Vision model returns `rknn_init=-6`, check `dmesg` for IOVA allocation failures and stop unrelated resident RKLLM/RKNN processes. A Qwen3-4B `rkchat` used about 5.2 GB and blocked the validated Qwen2-VL Vision model until it exited.

@@ -300,11 +300,15 @@ cd scripts/
 
 ```
 deploy/android/
-├── llm_demo          # 可执行文件 (4.7MB)
+├── rkchat            # ★ 主程序: 交互式聊天工具（源码: src/rkchat.cpp）
+├── rkchat.sh         # 板端启动脚本（模型切换器: qwen / deepseek）
 └── lib/
     ├── librkllmrt.so # RKLLM 运行时 (4.5MB)
     └── libomp.so     # OpenMP 运行时
 ```
+
+> `llm_demo` 为官方旧版示例，已被 `rkchat` 取代（支持多轮对话、数学预处理、
+> 内存保护、性能统计等，详见 [README 的 rkchat 章节](./README.md)）。
 
 ### 5.2 Linux 编译
 
@@ -323,60 +327,83 @@ cd scripts/
 
 ## 6. 板端部署与运行
 
+> 新版部署基于 **`rkchat`**（交互式聊天程序），替代旧版 `llm_demo`。
+> 设备端统一部署到 `/data/local/tmp/android/`，最终目录结构：
+
+```
+/data/local/tmp/android/
+├── rkchat                  # 主程序
+├── rkchat.sh               # 启动脚本（模型切换器，自动清理 NPU）
+├── lib/
+│   ├── librkllmrt.so       # RKLLM 运行时
+│   └── libomp.so           # OpenMP 运行时
+├── Qwen3-4B-Instruct_W8A8_RK3588.rkllm
+└── DeepSeek-R1-Distill-Qwen-1.5B_W8A8_RK3588.rkllm
+```
+
 ### 6.1 推送文件
 
 ```bash
-# 推 Android 二进制
-adb push ../deploy/android /data/
+# 推主程序与运行库
+adb push deploy/android/rkchat /data/local/tmp/android/
+adb push deploy/android/lib/ /data/local/tmp/android/lib/
+adb shell chmod 755 /data/local/tmp/android/rkchat
 
-# 推模型
-adb push ../model/DeepSeek-R1-Distill-Qwen-1.5B/output/*.rkllm /data/android/
+# 推板端启动脚本（模型切换器）
+adb push scripts/rkchat-device.sh /data/local/tmp/android/rkchat.sh
 
-# 推定频脚本（优化 NPU 性能）
-adb push ../sdk/scripts/fix_freq_rk3588.sh /data/android/
+# 推模型（按需选一个或都推）
+adb push model/Qwen3-4B-Instruct/output/Qwen3-4B-Instruct_W8A8_RK3588.rkllm /data/local/tmp/android/
+adb push model/DeepSeek-R1-Distill-Qwen-1.5B/output/DeepSeek-R1-Distill-Qwen-1.5B_W8A8_RK3588.rkllm /data/local/tmp/android/
 ```
 
-### 6.2 板端运行
+### 6.2 一键部署（推荐，PC 端脚本）
+
+`scripts/rkchat.sh` 自动完成推送 + 清理 + 启动：
+
+```bash
+cd scripts/
+
+./rkchat.sh --push              # 只推送二进制 + 库，打印启动命令
+./rkchat.sh --go                # 推送 + 自动启动（默认 Qwen3-4B）
+./rkchat.sh -m deepseek --go    # 切换 DeepSeek-R1-1.5B
+```
+
+### 6.3 板端运行
 
 ```bash
 adb shell
-cd /data/android
+cd /data/local/tmp/android
 
-# 设置库路径
+# 方式1: 启动脚本（自动选模型 + 清理旧进程 + 复位 NPU）
+sh rkchat.sh qwen              # Qwen3-4B，上下文 8192（通用对话）
+sh rkchat.sh deepseek          # DeepSeek-R1-1.5B，上下文 4096（速度快）
+
+# 方式2: 直接运行
 export LD_LIBRARY_PATH=./lib
-
-# 定频（提升 NPU 推理稳定性）
-sh fix_freq_rk3588.sh
-
-# 开启性能日志
-export RKLLM_LOG_LEVEL=1
-
-# 运行推理
-./llm_demo DeepSeek-R1-Distill-Qwen-1.5B_W8A8_RK3588.rkllm 2048 4096
+./rkchat Qwen3-4B-Instruct_W8A8_RK3588.rkllm 4096 8192
+#         ↑ 模型文件              ↑ 最大生成长度  ↑ 上下文长度
 ```
 
-用法: `./llm_demo <模型文件> <max_new_tokens> <max_context_len>`
+> **换模型/卡死时先清理 NPU**：杀掉旧的 rkchat / llm_demo 进程，并复位
+> `/sys/kernel/debug/rknpu/reset`。`rkchat.sh` 启动时已自动完成，无需手动操作。
 
-### 6.3 预期输出
+### 6.4 预期输出
 
 ```
-rkllm init start
-rkllm init success
-
-******************可输入以下问题对应序号获取回答/或自定义输入********************
-
-[0] 现有一笼子，里面有鸡和兔子若干只，数一数，共有头14个，腿38条...
-[1] 有28位小朋友排成一行,从左边开始数第10位是学豆...
-
-*************************************************************************
-
-user: 0
-robot: <think>
-首先，设鸡的数量为x，兔子的数量为y...
-</think>
-
-鸡有 9 只，兔子有 5 只。
+╔══════════════════════════════════════════════╗
+║     RKLLM Chat  —  RK3588/RK3576 NPU       ║
+╚══════════════════════════════════════════════╝
+  Model:    Qwen3-4B (通用对话模型)
+  Context:  8192 tokens
+  Preset:   balanced
+  History:  ON
+  Thinking: OFF
+▸ 你好，介绍一下你自己
 ```
+
+常用命令：`/help` 查看全部命令，`/clear` 清空历史，`/exit` 退出。
+完整使用说明见 `RKLLM_Chat使用指南.md`。
 
 ---
 
@@ -521,16 +548,24 @@ rkllm-quickstart/
 │   ├── build-linux.sh         # Linux 编译
 │   │   # 修改: GCC_COMPILER_PATH
 │   │
+│   ├── rkchat.sh              # PC 端一键部署 (--push / --go)
+│   ├── rkchat-device.sh       # 板端启动脚本（模型切换器）
+│   │
 │   └── data_quant.json        # 量化校准样本（20 条中英文混合）
+│
+├── src/                       # 主程序源码
+│   └── rkchat.cpp             # ★ rkchat 聊天程序（编译时复制到 sdk demo 目录）
 │
 ├── model/                      # 模型文件
 │   ├── DeepSeek-R1-Distill-Qwen-1.5B/  # 从 HF 下载的原始模型
 │   │   └── output/            # 转换后的 .rkllm 文件
+│   ├── Qwen3-4B-Instruct/     # 默认聊天模型（输出同名 .rkllm）
 │   └── custom/                # 自定义模型定义
 │
 ├── deploy/                     # 编译产物（自动生成）
 │   ├── android/               # Android 部署包
-│   │   ├── llm_demo
+│   │   ├── rkchat
+│   │   ├── rkchat.sh
 │   │   └── lib/
 │   └── linux/                 # Linux 部署包
 │
@@ -572,7 +607,7 @@ quantized_dtype = "W4A16"  # 或 "W8A8"
 cp sdk/rkllm-runtime/Android/librkllm_api/arm64-v8a/libomp.so deploy/android/lib/
 
 # 重新推送
-adb push deploy/android/lib/libomp.so /data/android/lib/
+adb push deploy/android/lib/libomp.so /data/local/tmp/android/lib/
 ```
 
 ### Q4: 转换速度太慢
@@ -627,4 +662,4 @@ Windows 侧通过 `X:\RK3576\rknn\05_llm` 获取服务器产物，再使用本�
 
 ---
 
-*最后更新: 2026-07*
+*最后更新: 2026-08*
